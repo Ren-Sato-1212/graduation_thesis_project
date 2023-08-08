@@ -1,0 +1,111 @@
+import numpy as np
+from workalendar.asia import SouthKorea
+import datetime
+
+
+def create_SI_matrix(simple_moving_average_matrix, previous_day_average_matrix):  # SI 계산
+    SI_matrix = np.zeros(simple_moving_average_matrix.shape)
+
+    for i in range(np.size(simple_moving_average_matrix, 0)):
+        SI_matrix[i][0:3] = simple_moving_average_matrix[i][0:3]  # 날짜 입력
+
+        SI_matrix[i][3] = simple_moving_average_matrix[i][3] - previous_day_average_matrix[i]
+        for j in range(4, 27):
+            SI_matrix[i][j] = simple_moving_average_matrix[i][j] - simple_moving_average_matrix[i][j-1]
+
+    return SI_matrix
+
+
+def create_CSI_matrix(SI_matrix):  # 누적 SI(CSI) 계산
+    CSI_matrix = np.zeros(SI_matrix.shape)
+
+    for i in range(np.size(SI_matrix, 0)):
+        CSI_matrix[i][0:4] = SI_matrix[i][0:4]
+
+        for j in range(4, 27):
+            CSI_matrix[i][j] = SI_matrix[i][j] + CSI_matrix[i][j-1]
+
+    return CSI_matrix
+
+
+def create_CSI_percent_matrix(CSI_matrix):  # 누적 SI(CSI)의 최대값에 대한 비율 계산
+    CSI_percent_matrix = np.zeros(CSI_matrix.shape)
+
+    CSI_max_matrix = np.amax(CSI_matrix[:, 3:], axis=1)
+
+    for i in range(np.size(CSI_matrix, 0)):
+        CSI_percent_matrix[i][0:3] = CSI_matrix[i][0:3]
+
+        for j in range(3, 27):
+            CSI_percent_matrix[i][j] = CSI_matrix[i][j] / CSI_max_matrix[i] * 100
+
+    return CSI_percent_matrix
+
+
+def create_CSI_percent_classfication_matrix(CSI_percent_matrix):  # ESS에 저장된 전기 에너지를 사용할 시간대 선택
+    CSI_percent_classfication_matrix = np.zeros(CSI_percent_matrix.shape)
+
+    for i in range(0, np.size(CSI_percent_matrix, 0)):
+        CSI_percent_classfication_matrix[i, 0:3] = CSI_percent_matrix[i][0:3]
+
+        for j in range(3, 27):
+            if CSI_percent_matrix[i][j] >= 80:
+                CSI_percent_classfication_matrix[i][j] = 1
+            else:
+                CSI_percent_classfication_matrix[i][j] = 0
+
+    return CSI_percent_classfication_matrix
+
+
+def simple_moving_average(input_file, weeks_size):  # 이동평균 모델
+    input_data = np.loadtxt(input_file, delimiter=',', skiprows=1)
+
+    previous_days_size = 7 * weeks_size
+
+    # 예측하고자 하는 근무일의 갯수 구하기
+    calendar = SouthKorea()
+    work_days_size = 0
+    for i in range(previous_days_size, np.size(input_data, 0)):
+        date = datetime.date(int(input_data[i][0]), int(input_data[i][1]), int(input_data[i][2]))
+        if calendar.is_working_day(date):
+            work_days_size = work_days_size + 1
+
+    simple_moving_average_matrix = np.zeros((work_days_size-1, 3+24))
+    previous_day_average_matrix = np.zeros(work_days_size-1)
+
+    index = 0
+    for i in range(previous_days_size + 1, np.size(input_data, 0)):
+        date = datetime.date(int(input_data[i][0]), int(input_data[i][1]), int(input_data[i][2]))
+        if calendar.is_working_day(date):  # 근무일만 예측
+            simple_moving_average_matrix[index][0:3] = input_data[i][0:3]  # 날짜 입력
+
+            previous_work_days_size = 0
+            for k in range(0, previous_days_size):
+                date = datetime.date(int(input_data[i-k-1][0]), int(input_data[i-k-1][1]), int(input_data[i-k-1][2]))
+                if calendar.is_working_day(date):
+                    for j in range(3+0, 3+24):
+                        simple_moving_average_matrix[index][j] = simple_moving_average_matrix[index][j] + input_data[i-k-1][j]  # 시간별로 이전 근무일의 전력 사용량 모두 더하기
+
+                    previous_day_average_matrix[index] = previous_day_average_matrix[index] + input_data[i-k-2][3+23]  # 전전 근무일의 오후 11시의 전략 사용량 모두 더하기
+
+                    previous_work_days_size = previous_work_days_size + 1
+
+            for j in range(3+0, 3+24):
+                simple_moving_average_matrix[index][j] = simple_moving_average_matrix[index][j] / previous_work_days_size  # 시간별로 이전 근무일의 전력 사용량에 대한 평균 구하기
+
+            previous_day_average_matrix[index] = previous_day_average_matrix[index] / previous_work_days_size  # 전전 근무일의 오후 11시의 전력 사용량에 대한 평균 구하기
+
+            index = index + 1
+
+    SI_matrix = create_SI_matrix(simple_moving_average_matrix, previous_day_average_matrix)  # SI 계산
+    CSI_matrix = create_CSI_matrix(SI_matrix)  # 누적 SI(CSI) 계산
+    CSI_percent_matrix = create_CSI_percent_matrix(CSI_matrix)  # 누적 SI(CSI)의 최대값에 대한 비율 계산
+    CSI_percent_classification_matrix = create_CSI_percent_classfication_matrix(CSI_percent_matrix)  # ESS에 저장된 전기 에너지를 사용할 시간대 선택
+
+    # 출력
+    if weeks_size == 8:
+        np.savetxt('MA-Prediction-80-8w.csv', CSI_percent_classification_matrix, delimiter=',', header='year, month, day', fmt='%4d')
+    elif weeks_size == 4:
+        np.savetxt('MA-Prediction-80-4w.csv', CSI_percent_classification_matrix, delimiter=',', header='year, month, day', fmt='%4d')
+    else:
+        np.savetxt('MA-Prediction-80-2w.csv', CSI_percent_classification_matrix, delimiter=',', header='year, month, day', fmt='%4d')
